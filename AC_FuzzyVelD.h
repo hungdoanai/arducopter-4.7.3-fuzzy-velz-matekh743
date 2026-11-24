@@ -5,16 +5,19 @@
 #include <AP_Math/AP_Math.h>
 
 // Fuzzy-PID gain scheduling controller for the vertical (D/Z-axis) velocity loop.
-// Adapted from Mamdani 7x7 fuzzy velocity PID tuning for ArduCopter AC_PosControl.
-// Exposes Mission Planner parameters under PSC_D_FZ_* (and Q_P_D_FZ_* on QuadPlane).
+// Symmetric 7x7 Mamdani Fuzzy-PID for ArduCopter AC_PosControl (Copter-4.7.3).
+// Exposes Mission Planner parameters under PSC_D_FZ_* (and Q_P_D_FZ_* on QuadPlane),
+// including optional RC transmitter switch toggle via PSC_D_FZ_RC.
 class AC_FuzzyVelD {
 public:
     AC_FuzzyVelD();
 
     CLASS_NO_COPY(AC_FuzzyVelD);
 
-    // Returns true if fuzzy gain scheduling is enabled (PSC_D_FZ_ENABLE == 1).
-    bool enabled() const { return _enable.get() != 0; }
+    // Returns true if fuzzy gain scheduling is currently active
+    // (controlled by PSC_D_FZ_RC TX switch if > 0, otherwise PSC_D_FZ_ENABLE).
+    // Automatically resets internal state on OFF transition and notifies GCS/OSD.
+    bool enabled();
 
     // Resets internal derivative filter and fuzzy delta-I integrator state.
     void reset();
@@ -62,9 +65,12 @@ private:
     AP_Float _di_max;       // Max |delta Ki| adjustment
     AP_Float _dd_max;       // Max |delta Kd| adjustment
     AP_Float _filt_d_hz;    // Low-pass filter cutoff for error derivative (Hz)
+    AP_Int8  _rc_chan;      // Optional RC channel (5..16) to toggle Fuzzy via TX switch (0 = disabled)
 
     // Internal runtime state (no dynamic allocation)
     bool  _reset_filter;
+    bool  _rc_active;
+    bool  _last_active;
     float _prev_error;
     float _deriv_filt;
     float _delta_i_term;
