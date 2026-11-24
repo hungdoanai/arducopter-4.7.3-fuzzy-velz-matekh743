@@ -1,0 +1,278 @@
+#include "AC_FuzzyVelD.h"
+
+#include <cmath>
+
+// Default parameter values tuned for ArduCopter 4.7.3 SI-unit (m/s, m/s^2) Z-velocity loop
+// Default PSC_D_VEL_P = 5.0, PSC_D_VEL_I = 0.0, PSC_D_VEL_D = 0.0
+#define FUZZY_VELD_ENABLE_DEFAULT   0
+#define FUZZY_VELD_E_MAX_DEFAULT    1.5f    // m/s
+#define FUZZY_VELD_ED_MAX_DEFAULT   3.0f    // m/s^2
+#define FUZZY_VELD_DP_MAX_DEFAULT   2.0f    // max +/- delta Kp
+#define FUZZY_VELD_DI_MAX_DEFAULT   0.5f    // max +/- delta Ki
+#define FUZZY_VELD_DD_MAX_DEFAULT   0.10f   // max +/- delta Kd
+#define FUZZY_VELD_FILT_D_DEFAULT   5.0f    // Hz
+
+const AP_Param::GroupInfo AC_FuzzyVelD::var_info[] = {
+    // @Param: ENABLE
+    // @DisplayName: Vertical velocity Fuzzy-PID enable
+    // @Description: Enables Mamdani Fuzzy gain-scheduling PID in the vertical (Z/Down) velocity control loop. Set to 0 for standard ArduCopter PID.
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Standard
+    AP_GROUPINFO("ENABLE", 1, AC_FuzzyVelD, _enable, FUZZY_VELD_ENABLE_DEFAULT),
+
+    // @Param: E_MAX
+    // @DisplayName: Vertical velocity Fuzzy error scale
+    // @Description: Normalization range for vertical velocity error (m/s). Errors beyond +/-E_MAX saturate to +/-1.0 in the fuzzy universe.
+    // @Units: m/s
+    // @Range: 0.2 5.0
+    // @Increment: 0.1
+    // @User: Advanced
+    AP_GROUPINFO("E_MAX", 2, AC_FuzzyVelD, _e_max, FUZZY_VELD_E_MAX_DEFAULT),
+
+    // @Param: ED_MAX
+    // @DisplayName: Vertical velocity Fuzzy error rate scale
+    // @Description: Normalization range for vertical velocity error derivative (m/s/s).
+    // @Units: m/s/s
+    // @Range: 0.5 15.0
+    // @Increment: 0.2
+    // @User: Advanced
+    AP_GROUPINFO("ED_MAX", 3, AC_FuzzyVelD, _ed_max, FUZZY_VELD_ED_MAX_DEFAULT),
+
+    // @Param: DP_MAX
+    // @DisplayName: Vertical velocity Fuzzy max delta P gain
+    // @Description: Maximum +/- proportional gain adjustment added to PSC_D_VEL_P by the fuzzy inference engine.
+    // @Range: 0.0 5.0
+    // @Increment: 0.1
+    // @User: Standard
+    AP_GROUPINFO("DP_MAX", 4, AC_FuzzyVelD, _dp_max, FUZZY_VELD_DP_MAX_DEFAULT),
+
+    // @Param: DI_MAX
+    // @DisplayName: Vertical velocity Fuzzy max delta I gain
+    // @Description: Maximum +/- integral gain adjustment added to PSC_D_VEL_I by the fuzzy inference engine.
+    // @Range: 0.0 3.0
+    // @Increment: 0.05
+    // @User: Standard
+    AP_GROUPINFO("DI_MAX", 5, AC_FuzzyVelD, _di_max, FUZZY_VELD_DI_MAX_DEFAULT),
+
+    // @Param: DD_MAX
+    // @DisplayName: Vertical velocity Fuzzy max delta D gain
+    // @Description: Maximum +/- derivative gain adjustment added to PSC_D_VEL_D by the fuzzy inference engine.
+    // @Range: 0.0 1.0
+    // @Increment: 0.01
+    // @User: Standard
+    AP_GROUPINFO("DD_MAX", 6, AC_FuzzyVelD, _dd_max, FUZZY_VELD_DD_MAX_DEFAULT),
+
+    // @Param: FILT
+    // @DisplayName: Vertical velocity Fuzzy derivative filter
+    // @Description: Low-pass filter cutoff frequency (Hz) applied to the vertical velocity error derivative before fuzzification.
+    // @Units: Hz
+    // @Range: 0.5 30.0
+    // @Increment: 0.5
+    // @User: Advanced
+    AP_GROUPINFO("FILT", 7, AC_FuzzyVelD, _filt_d_hz, FUZZY_VELD_FILT_D_DEFAULT),
+
+    AP_GROUPEND
+};
+
+// Membership function centers on [-1, 1] for {NB, NM, NS, ZO, PS, PM, PB}
+static constexpr float MF_CENTERS[7] = {
+    -1.0f, -0.6666667f, -0.3333333f, 0.0f, 0.3333333f, 0.6666667f, 1.0f
+};
+
+// Standard 7x7 Mamdani Fuzzy-PID rule tables (rows = e, cols = de/dt)
+// Indices: 0=NB, 1=NM, 2=NS, 3=ZO, 4=PS, 5=PM, 6=PB
+static constexpr uint8_t RULE_KP[7][7] = {
+    {6, 6, 5, 5, 4, 3, 3},
+    {6, 6, 5, 4, 4, 3, 2},
+    {5, 5, 5, 4, 3, 2, 2},
+    {5, 5, 4, 3, 2, 1, 1},
+    {4, 4, 3, 2, 2, 1, 1},
+    {4, 3, 2, 1, 1, 1, 0},
+    {3, 3, 1, 1, 1, 0, 0},
+};
+
+static constexpr uint8_t RULE_KI[7][7] = {
+    {0, 0, 1, 1, 2, 3, 3},
+    {0, 0, 1, 2, 2, 3, 3},
+    {0, 1, 2, 2, 3, 4, 4},
+    {1, 1, 2, 3, 4, 5, 5},
+    {1, 2, 3, 4, 4, 5, 6},
+    {3, 3, 4, 4, 5, 6, 6},
+    {3, 3, 4, 5, 5, 6, 6},
+};
+
+static constexpr uint8_t RULE_KD[7][7] = {
+    {4, 2, 0, 0, 0, 1, 4},
+    {4, 2, 0, 1, 1, 2, 3},
+    {3, 2, 1, 1, 2, 2, 3},
+    {3, 2, 2, 2, 2, 2, 3},
+    {3, 3, 3, 3, 3, 3, 3},
+    {6, 2, 4, 4, 4, 4, 6},
+    {6, 5, 5, 5, 4, 4, 6},
+};
+
+AC_FuzzyVelD::AC_FuzzyVelD()
+    : _reset_filter(true)
+    , _prev_error(0.0f)
+    , _deriv_filt(0.0f)
+    , _delta_i_term(0.0f)
+    , _last_delta_kp(0.0f)
+    , _last_delta_ki(0.0f)
+    , _last_delta_kd(0.0f)
+{
+    AP_Param::setup_object_defaults(this, var_info);
+}
+
+void AC_FuzzyVelD::reset()
+{
+    _reset_filter = true;
+    _prev_error = 0.0f;
+    _deriv_filt = 0.0f;
+    _delta_i_term = 0.0f;
+    _last_delta_kp = 0.0f;
+    _last_delta_ki = 0.0f;
+    _last_delta_kd = 0.0f;
+}
+
+void AC_FuzzyVelD::fuzzify(float x_norm, float mu[NUM_MF])
+{
+    const float x = constrain_float(x_norm, -1.0f, 1.0f);
+    constexpr float step = 1.0f / 3.0f;
+
+    for (uint8_t i = 0; i < NUM_MF; i++) {
+        const float dist = fabsf(x - MF_CENTERS[i]);
+        if (dist < step) {
+            mu[i] = 1.0f - (dist / step);
+        } else {
+            mu[i] = 0.0f;
+        }
+    }
+}
+
+void AC_FuzzyVelD::infer(const float mu_e[NUM_MF],
+                         const float mu_ec[NUM_MF],
+                         float &out_kp_norm,
+                         float &out_ki_norm,
+                         float &out_kd_norm)
+{
+    float agg_kp[NUM_MF] = {};
+    float agg_ki[NUM_MF] = {};
+    float agg_kd[NUM_MF] = {};
+
+    for (uint8_t i = 0; i < NUM_MF; i++) {
+        if (mu_e[i] <= 0.0f) {
+            continue;
+        }
+        for (uint8_t j = 0; j < NUM_MF; j++) {
+            if (mu_ec[j] <= 0.0f) {
+                continue;
+            }
+            const float w = MIN(mu_e[i], mu_ec[j]);
+            const uint8_t rk = RULE_KP[i][j];
+            const uint8_t ri = RULE_KI[i][j];
+            const uint8_t rd = RULE_KD[i][j];
+            if (w > agg_kp[rk]) {
+                agg_kp[rk] = w;
+            }
+            if (w > agg_ki[ri]) {
+                agg_ki[ri] = w;
+            }
+            if (w > agg_kd[rd]) {
+                agg_kd[rd] = w;
+            }
+        }
+    }
+
+    auto defuzzify = [](const float agg[NUM_MF]) -> float {
+        float num = 0.0f;
+        float den = 0.0f;
+        for (uint8_t k = 0; k < NUM_MF; k++) {
+            num += agg[k] * MF_CENTERS[k];
+            den += agg[k];
+        }
+        if (den <= 1e-6f) {
+            return 0.0f;
+        }
+        return constrain_float(num / den, -1.0f, 1.0f);
+    };
+
+    out_kp_norm = defuzzify(agg_kp);
+    out_ki_norm = defuzzify(agg_ki);
+    out_kd_norm = defuzzify(agg_kd);
+}
+
+float AC_FuzzyVelD::update(float vel_error_ms,
+                           float dt_s,
+                           bool limit_neg,
+                           bool limit_pos,
+                           float base_kp,
+                           float base_ki,
+                           float base_kd,
+                           float imax_mss)
+{
+    if (!enabled() || !is_positive(dt_s)) {
+        reset();
+        return 0.0f;
+    }
+
+    if (_reset_filter) {
+        _reset_filter = false;
+        _prev_error = vel_error_ms;
+        _deriv_filt = 0.0f;
+    } else {
+        const float raw_deriv = (vel_error_ms - _prev_error) / dt_s;
+        _prev_error = vel_error_ms;
+        const float filt_hz = MAX(_filt_d_hz.get(), 0.5f);
+        const float alpha = calc_lowpass_alpha_dt(dt_s, filt_hz);
+        _deriv_filt += alpha * (raw_deriv - _deriv_filt);
+    }
+
+    const float e_scale = MAX(_e_max.get(), 0.1f);
+    const float ed_scale = MAX(_ed_max.get(), 0.2f);
+    const float e_norm = constrain_float(vel_error_ms / e_scale, -1.0f, 1.0f);
+    const float ec_norm = constrain_float(_deriv_filt / ed_scale, -1.0f, 1.0f);
+
+    float mu_e[NUM_MF];
+    float mu_ec[NUM_MF];
+    fuzzify(e_norm, mu_e);
+    fuzzify(ec_norm, mu_ec);
+
+    float out_kp_norm = 0.0f;
+    float out_ki_norm = 0.0f;
+    float out_kd_norm = 0.0f;
+    infer(mu_e, mu_ec, out_kp_norm, out_ki_norm, out_kd_norm);
+
+    const float dp_max = MAX(_dp_max.get(), 0.0f);
+    const float di_max = MAX(_di_max.get(), 0.0f);
+    const float dd_max = MAX(_dd_max.get(), 0.0f);
+
+    float delta_kp = out_kp_norm * dp_max;
+    float delta_ki = out_ki_norm * di_max;
+    float delta_kd = out_kd_norm * dd_max;
+
+    const float min_delta_kp = -0.5f * MAX(base_kp, 0.0f);
+    if (delta_kp < min_delta_kp) {
+        delta_kp = min_delta_kp;
+    }
+    if (base_ki + delta_ki < 0.0f) {
+        delta_ki = -base_ki;
+    }
+    if (base_kd + delta_kd < 0.0f) {
+        delta_kd = -base_kd;
+    }
+
+    _last_delta_kp = delta_kp;
+    _last_delta_ki = delta_ki;
+    _last_delta_kd = delta_kd;
+
+    const float di_step = delta_ki * vel_error_ms * dt_s;
+    const bool allow_integrate =
+        (!limit_pos || di_step < 0.0f) &&
+        (!limit_neg || di_step > 0.0f);
+    if (allow_integrate) {
+        const float i_lim = MAX(imax_mss * 0.5f, 0.0f);
+        _delta_i_term = constrain_float(_delta_i_term + di_step, -i_lim, i_lim);
+    }
+
+    return (delta_kp * vel_error_ms) + _delta_i_term + (delta_kd * _deriv_filt);
+}
