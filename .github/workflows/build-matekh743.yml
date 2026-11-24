@@ -1,0 +1,51 @@
+name: Build ArduCopter 4.7.3 Fuzzy-VelZ (MatekH743)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-matekh743:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Fuzzy-VelZ overlay repo
+        uses: actions/checkout@v4
+        with:
+          path: fuzzy_overlay
+
+      - name: Checkout ArduPilot Copter-4.7.3
+        uses: actions/checkout@v4
+        with:
+          repository: ArduPilot/ardupilot
+          ref: Copter-4.7.3
+          submodules: recursive
+          fetch-depth: 1
+          path: ardupilot
+
+      - name: Install ARM toolchain and Python build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi g++ python3-pip python3-dev ccache
+          pip3 install --upgrade pip
+          pip3 install empy==3.3.4 pexpect future lxml pymavlink intelhex
+
+      - name: Apply Fuzzy Z-velocity controller patch
+        run: |
+          python3 fuzzy_overlay/apply_patch.py ardupilot
+          cd ardupilot && git status --short
+
+      - name: Configure and build ArduCopter for MatekH743
+        working-directory: ardupilot
+        run: |
+          ./waf configure --board MatekH743
+          ./waf copter
+
+      - name: Upload MatekH743 firmware artifacts (.apj & .hex)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArduCopter-4.7.3-FuzzyVelZ-MatekH743
+          path: |
+            ardupilot/build/MatekH743/bin/arducopter.apj
+            ardupilot/build/MatekH743/bin/arducopter_with_bl.hex
+            ardupilot/build/MatekH743/bin/arducopter.bin
