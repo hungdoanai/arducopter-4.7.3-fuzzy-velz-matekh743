@@ -23,7 +23,7 @@
 const AP_Param::GroupInfo AC_FuzzyVelD::var_info[] = {
     // @Param: ENABLE
     // @DisplayName: Vertical velocity Fuzzy-PID enable
-    // @Description: Enables symmetric Mamdani Fuzzy gain-scheduling PID in the vertical (Z/Down) velocity loop when PSC_D_FZ_RC is 0. Set to 0 for standard ArduCopter PID.
+    // @Description: Enables symmetric zero-order Sugeno Fuzzy gain-scheduling PID in the vertical (Z/Down) velocity loop when PSC_D_FZ_RC is 0. Set to 0 for standard ArduCopter PID.
     // @Values: 0:Disabled,1:Enabled
     // @User: Standard
     AP_GROUPINFO("ENABLE", 1, AC_FuzzyVelD, _enable, FUZZY_VELD_ENABLE_DEFAULT),
@@ -48,7 +48,7 @@ const AP_Param::GroupInfo AC_FuzzyVelD::var_info[] = {
 
     // @Param: DP_MAX
     // @DisplayName: Vertical velocity Fuzzy max delta P gain
-    // @Description: Maximum +/- proportional gain adjustment added to PSC_D_VEL_P by the fuzzy inference engine.
+    // @Description: Maximum +/- proportional gain adjustment added to PSC_D_VEL_P by the zero-order Sugeno fuzzy inference engine.
     // @Range: 0.0 5.0
     // @Increment: 0.1
     // @User: Standard
@@ -56,7 +56,7 @@ const AP_Param::GroupInfo AC_FuzzyVelD::var_info[] = {
 
     // @Param: DI_MAX
     // @DisplayName: Vertical velocity Fuzzy max delta I gain
-    // @Description: Maximum +/- integral gain adjustment added to PSC_D_VEL_I by the fuzzy inference engine.
+    // @Description: Maximum +/- integral gain adjustment added to PSC_D_VEL_I by the zero-order Sugeno fuzzy inference engine.
     // @Range: 0.0 3.0
     // @Increment: 0.05
     // @User: Standard
@@ -64,7 +64,7 @@ const AP_Param::GroupInfo AC_FuzzyVelD::var_info[] = {
 
     // @Param: DD_MAX
     // @DisplayName: Vertical velocity Fuzzy max delta D gain
-    // @Description: Maximum +/- derivative gain adjustment added to PSC_D_VEL_D by the fuzzy inference engine.
+    // @Description: Maximum +/- derivative gain adjustment added to PSC_D_VEL_D by the zero-order Sugeno fuzzy inference engine.
     // @Range: 0.0 1.0
     // @Increment: 0.01
     // @User: Standard
@@ -90,14 +90,13 @@ const AP_Param::GroupInfo AC_FuzzyVelD::var_info[] = {
     AP_GROUPEND
 };
 
-// Membership function centers on [-1, 1] for {NB, NM, NS, ZO, PS, PM, PB}
+// Input MF centers and zero-order Sugeno output singletons on [-1, 1] for {NB, NM, NS, ZO, PS, PM, PB}
 static constexpr float MF_CENTERS[7] = {
     -1.0f, -0.6666667f, -0.3333333f, 0.0f, 0.3333333f, 0.6666667f, 1.0f
 };
 
-// Centrally symmetric 7x7 Mamdani Fuzzy-PID rule tables (rows = e, cols = de/dt)
+// Centrally symmetric 7x7 zero-order Sugeno Fuzzy-PID rule tables (rows = e, cols = de/dt)
 // Symmetric for both climb and descent: RULE[6-i][6-j] == RULE[i][j]
-// Indices: 0=NB, 1=NM, 2=NS, 3=ZO, 4=PS, 5=PM, 6=PB
 static constexpr uint8_t RULE_KP[7][7] = {
     {6, 6, 5, 5, 4, 3, 3},
     {6, 5, 5, 4, 4, 3, 2},
@@ -212,9 +211,13 @@ void AC_FuzzyVelD::infer(const float mu_e[NUM_MF],
                          float &out_ki_norm,
                          float &out_kd_norm)
 {
-    float agg_kp[NUM_MF] = {};
-    float agg_ki[NUM_MF] = {};
-    float agg_kd[NUM_MF] = {};
+    // Zero-order Takagi-Sugeno inference:
+    //   w_ij = mu_e[i] * mu_ec[j]   (algebraic product T-norm)
+    //   out  = sum(w_ij * z_ij) / sum(w_ij)   (weighted average of singleton consequents)
+    float num_kp = 0.0f;
+    float num_ki = 0.0f;
+    float num_kd = 0.0f;
+    float sum_w = 0.0f;
 
     for (uint8_t i = 0; i < NUM_MF; i++) {
         if (mu_e[i] <= 0.0f) {
@@ -224,38 +227,25 @@ void AC_FuzzyVelD::infer(const float mu_e[NUM_MF],
             if (mu_ec[j] <= 0.0f) {
                 continue;
             }
-            const float w = MIN(mu_e[i], mu_ec[j]);
-            const uint8_t rk = RULE_KP[i][j];
-            const uint8_t ri = RULE_KI[i][j];
-            const uint8_t rd = RULE_KD[i][j];
-            if (w > agg_kp[rk]) {
-                agg_kp[rk] = w;
-            }
-            if (w > agg_ki[ri]) {
-                agg_ki[ri] = w;
-            }
-            if (w > agg_kd[rd]) {
-                agg_kd[rd] = w;
-            }
+            const float w = mu_e[i] * mu_ec[j];
+            sum_w += w;
+            num_kp += w * MF_CENTERS[RULE_KP[i][j]];
+            num_ki += w * MF_CENTERS[RULE_KI[i][j]];
+            num_kd += w * MF_CENTERS[RULE_KD[i][j]];
         }
     }
 
-    auto defuzzify = [](const float agg[NUM_MF]) -> float {
-        float num = 0.0f;
-        float den = 0.0f;
-        for (uint8_t k = 0; k < NUM_MF; k++) {
-            num += agg[k] * MF_CENTERS[k];
-            den += agg[k];
-        }
-        if (den <= 1e-6f) {
-            return 0.0f;
-        }
-        return constrain_float(num / den, -1.0f, 1.0f);
-    };
+    if (sum_w <= 1e-6f) {
+        out_kp_norm = 0.0f;
+        out_ki_norm = 0.0f;
+        out_kd_norm = 0.0f;
+        return;
+    }
 
-    out_kp_norm = defuzzify(agg_kp);
-    out_ki_norm = defuzzify(agg_ki);
-    out_kd_norm = defuzzify(agg_kd);
+    const float inv_w = 1.0f / sum_w;
+    out_kp_norm = constrain_float(num_kp * inv_w, -1.0f, 1.0f);
+    out_ki_norm = constrain_float(num_ki * inv_w, -1.0f, 1.0f);
+    out_kd_norm = constrain_float(num_kd * inv_w, -1.0f, 1.0f);
 }
 
 float AC_FuzzyVelD::update(float vel_error_ms,
