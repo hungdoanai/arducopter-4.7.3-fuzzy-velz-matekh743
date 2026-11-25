@@ -1,6 +1,6 @@
-# ArduCopter 4.7.3 — Fuzzy-PID Vòng Vận Tốc Trục Độ Cao (Matek H743)
+# ArduCopter 4.7.3 — Fuzzy-PID Sugeno Bậc 0 Vòng Vận Tốc Trục Độ Cao (Matek H743)
 
-Dự án tích hợp bộ điều khiển **Mamdani Fuzzy-PID (7×7 luật mờ)** vào vòng điều khiển vận tốc trục độ cao (trục Z/Down — `AC_PosControl::D_update_controller()`) cho **ArduCopter 4.7.3**, hỗ trợ bật/tắt tức thì bằng **công tắc tay điều khiển TX** và cấu hình trực tiếp trên **Mission Planner**, biên dịch tự động ra firmware `.apj` nạp cho bo mạch **Matek H743**.
+Dự án tích hợp bộ điều khiển **Sugeno bậc 0 đối xứng tâm (7×7 luật mờ, phép nhân đại số và trung bình có trọng số)** vào vòng điều khiển vận tốc trục độ cao (trục Z/Down — `AC_PosControl::D_update_controller()`) cho **ArduCopter 4.7.3**, hỗ trợ bật/tắt tức thì bằng **công tắc tay điều khiển TX** và cấu hình trực tiếp trên **Mission Planner**, biên dịch tự động ra firmware `.apj` nạp cho bo mạch **Matek H743**.
 
 ## Tham số cấu hình trên Mission Planner
 Sau khi nạp file `arducopter.apj`, vào **Config → Full Parameter List** và tìm nhóm **`PSC_D_FZ_`**:
