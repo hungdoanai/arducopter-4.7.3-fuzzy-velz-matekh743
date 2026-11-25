@@ -5,7 +5,7 @@
 #include <AP_Math/AP_Math.h>
 
 // Fuzzy-PID gain scheduling controller for the vertical (D/Z-axis) velocity loop.
-// Symmetric 7x7 Mamdani Fuzzy-PID for ArduCopter AC_PosControl (Copter-4.7.3).
+// Zero-order Takagi-Sugeno 7x7 centrally symmetric Fuzzy-PID for ArduCopter AC_PosControl (Copter-4.7.3).
 // Exposes Mission Planner parameters under PSC_D_FZ_* (and Q_P_D_FZ_* on QuadPlane),
 // including optional RC transmitter switch toggle via PSC_D_FZ_RC.
 class AC_FuzzyVelD {
@@ -47,10 +47,10 @@ private:
     // 7 linguistic terms: NB=-3, NM=-2, NS=-1, ZO=0, PS=+1, PM=+2, PB=+3
     static constexpr uint8_t NUM_MF = 7;
 
-    // Evaluates 7 overlapping triangular membership functions over [-1, 1].
+    // Evaluates 7 overlapping triangular membership functions over [-1, 1] (partition of unity).
     static void fuzzify(float x_norm, float mu[NUM_MF]);
 
-    // Mamdani min-max inference with centroid defuzzification on [-1, 1].
+    // Zero-order Sugeno inference (product T-norm + weighted average defuzzification on [-1, 1]).
     static void infer(const float mu_e[NUM_MF],
                       const float mu_ec[NUM_MF],
                       float &out_kp_norm,
